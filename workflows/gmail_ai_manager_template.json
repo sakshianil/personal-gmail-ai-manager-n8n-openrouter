@@ -1,0 +1,702 @@
+{
+  "name": "Personal Gmail AI Manager - OpenRouter + Google Sheets",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "q": "in:inbox newer_than:14d -label:\"AI Manager/Important\" -label:\"AI Manager/Needs Review\" -label:\"AI Manager/Business Leads\" -label:\"AI Manager/Delete Candidate\""
+        },
+        "options": {}
+      },
+      "name": "Gmail Trigger - New Inbox Email",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        1120,
+        1056
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Your gmailOAuth2 credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "messageId": "={{ $json.id }}",
+        "simple": false,
+        "options": {}
+      },
+      "name": "Gmail - Get Full Message",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1344,
+        1056
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Your gmailOAuth2 credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputData = $input.first().json;\n\nfunction safeString(value) {\n  if (value === undefined || value === null) return '';\n  if (typeof value === 'string') return value;\n  if (Array.isArray(value)) {\n    return value.map(v => safeString(v)).filter(Boolean).join(', ');\n  }\n  if (typeof value === 'object') {\n    if (value.email) return safeString(value.email);\n    if (value.address) return safeString(value.address);\n    if (value.value) return safeString(value.value);\n    if (value.name && value.email) return `${value.name} <${value.email}>`;\n    try { return JSON.stringify(value); } catch (e) { return ''; }\n  }\n  return String(value);\n}\n\nfunction getHeader(name) {\n  const headers = inputData.payload?.headers || inputData.headers || inputData.message?.payload?.headers || [];\n\n  if (Array.isArray(headers)) {\n    const found = headers.find(h => h.name && h.name.toLowerCase() === name.toLowerCase());\n    return safeString(found?.value || '');\n  }\n\n  if (headers && typeof headers === 'object') {\n    return safeString(headers[name] || headers[name.toLowerCase()] || '');\n  }\n\n  return '';\n}\n\nfunction decodeBase64Url(data) {\n  if (!data) return '';\n  try {\n    const base64 = String(data).replace(/-/g, '+').replace(/_/g, '/');\n    return Buffer.from(base64, 'base64').toString('utf8');\n  } catch (error) {\n    return '';\n  }\n}\n\nfunction stripHtml(html) {\n  return safeString(html)\n    .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n    .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n    .replace(/<[^>]*>/g, ' ')\n    .replace(/&nbsp;/g, ' ')\n    .replace(/&amp;/g, '&')\n    .replace(/&lt;/g, '<')\n    .replace(/&gt;/g, '>')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nfunction extractBody(payload) {\n  if (!payload) return safeString(inputData.text || inputData.body || inputData.snippet || '');\n\n  if (payload.body?.data) {\n    const decoded = decodeBase64Url(payload.body.data);\n    return payload.mimeType === 'text/html' ? stripHtml(decoded) : decoded;\n  }\n\n  if (Array.isArray(payload.parts)) {\n    let plainText = '';\n    let htmlText = '';\n\n    for (const part of payload.parts) {\n      if (part.mimeType === 'text/plain' && part.body?.data) {\n        plainText += decodeBase64Url(part.body.data) + '\\n';\n      }\n\n      if (part.mimeType === 'text/html' && part.body?.data) {\n        htmlText += stripHtml(decodeBase64Url(part.body.data)) + '\\n';\n      }\n\n      if (Array.isArray(part.parts)) {\n        const nested = extractBody(part);\n        if (nested) plainText += nested + '\\n';\n      }\n    }\n\n    return plainText.trim() || htmlText.trim() || safeString(inputData.snippet || '');\n  }\n\n  return safeString(inputData.snippet || '');\n}\n\nfunction extractEmailAddress(value) {\n  const text = safeString(value);\n  const angleMatch = text.match(/<([^>]+)>/);\n  if (angleMatch) return angleMatch[1].trim();\n  const emailMatch = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i);\n  return emailMatch ? emailMatch[0].trim() : text;\n}\n\nconst subjectText = safeString(inputData.subject || getHeader('Subject'));\nconst fromText = safeString(inputData.from || getHeader('From'));\nconst toText = safeString(inputData.to || getHeader('To'));\nconst dateText = safeString(inputData.date || getHeader('Date'));\nconst emailText = safeString(extractBody(inputData.payload) || inputData.text || inputData.body || inputData.snippet || '');\nconst messageId = safeString(inputData.id || inputData.messageId || inputData.message_id || '');\nconst combinedForSource = `${toText} ${fromText}`.toLowerCase();\n\nreturn [\n  {\n    json: {\n      messageId,\n      threadId: safeString(inputData.threadId || ''),\n      subject: subjectText,\n      from: fromText,\n      to: toText,\n      replyToEmail: extractEmailAddress(fromText),\n      date: dateText,\n      snippet: safeString(inputData.snippet || ''),\n      text: emailText.slice(0, 12000),\n      body: emailText.slice(0, 12000),\n      accountSource: combinedForSource.includes('info@lovemeer.de')\n        ? 'info@lovemeer.de'\n        : 'sbbinfo90@gmail.com',\n      gmailLink: messageId ? `https://mail.google.com/mail/u/0/#inbox/${messageId}` : ''\n    }\n  }\n];\n"
+      },
+      "name": "Code - Extract Email Fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1568,
+        1056
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openRouterApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "HTTP-Referer",
+              "value": "https://lovemeer.de"
+            },
+            {
+              "name": "X-Title",
+              "value": "Lovemeer Gmail AI Manager"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  model: 'deepseek/deepseek-chat-v3-0324',\n  temperature: 0.1,\n  response_format: { type: 'json_object' },\n  messages: [\n    {\n      role: 'system',\n      content: `You are an intelligent Gmail triage assistant for the user. Classify one email into exactly one category.\n\nCategories:\nIMPORTANT: personal, legal, finance, job, university, customer, client, government, banking, invoices, medical, family, calendar, domain, hosting, tax, visa, or anything requiring attention.\nBUSINESS_LEAD: collaboration, partnership, supplier, manufacturer, restaurant, brand inquiry, commercial opportunity, sponsorship, investor, sales opportunity, or business-related reply.\nNEEDS_REVIEW: unclear emails, newsletters that may contain useful information, or anything uncertain.\nDELETE_CANDIDATE: obvious spam, mass marketing, expired sale, irrelevant promotion, automated notification, social media noise, forum updates, or low-value newsletters with no business relevance.\n\nRules:\nNever classify as DELETE_CANDIDATE if the email mentions collaboration, invoice, payment, contract, offer, supplier, manufacturer, restaurant, event, customer, order, visa, job, university, domain, hosting, tax, bank, legal, family, medical, government, or a real human reply.\nWhen uncertain, choose NEEDS_REVIEW.\nFor BUSINESS_LEAD, write a short professional draft reply.\nDo not send anything automatically.\nReturn only valid JSON in this exact structure:\n{\n  \"category\": \"IMPORTANT | BUSINESS_LEAD | NEEDS_REVIEW | DELETE_CANDIDATE\",\n  \"confidence\": 0.0,\n  \"reason\": \"short reason\",\n  \"summary\": \"one sentence summary\",\n  \"suggested_action\": \"what should happen next\",\n  \"draft_reply_needed\": true,\n  \"draft_reply\": \"draft reply if needed, otherwise empty string\"\n}`\n    },\n    {\n      role: 'user',\n      content: `Email metadata and body:\nSubject: ${$json.subject}\nFrom: ${$json.from}\nTo: ${$json.to}\nDate: ${$json.date}\nAccount source: ${$json.accountSource}\nBody/snippet: ${$json.text || $json.body || $json.snippet}`\n    }\n  ]\n} }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "name": "OpenRouter - Classify Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1808,
+        1056
+      ],
+      "credentials": {
+        "openRouterApi": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Your openRouterApi credential"
+        },
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Your httpHeaderAuth credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const email = $('Code - Extract Email Fields').first().json;\nconst raw = $json.choices?.[0]?.message?.content || '{}';\nlet ai;\ntry {\n  ai = JSON.parse(raw);\n} catch (e) {\n  ai = {\n    category: 'NEEDS_REVIEW',\n    confidence: 0.0,\n    reason: 'AI returned invalid JSON, requires manual review.',\n    summary: email.snippet || email.subject,\n    suggested_action: 'Review manually.',\n    draft_reply_needed: false,\n    draft_reply: ''\n  };\n}\n\nconst allowed = ['IMPORTANT', 'BUSINESS_LEAD', 'NEEDS_REVIEW', 'DELETE_CANDIDATE'];\nif (!allowed.includes(ai.category)) ai.category = 'NEEDS_REVIEW';\n\nconst dangerWords = /collaboration|invoice|payment|contract|offer|supplier|manufacturer|restaurant|event|customer|order|visa|job|university|siteground|domain|tax|bank|legal|medical|government|amt|finanzamt|rechnung/i;\nif (ai.category === 'DELETE_CANDIDATE' && dangerWords.test(`${email.subject} ${email.from} ${email.to} ${email.text} ${email.body}`)) {\n  ai.category = 'NEEDS_REVIEW';\n  ai.reason = `Safety override: original AI decision was delete, but sensitive/business keywords were detected. ${ai.reason || ''}`;\n}\n\nreturn [{\n  json: {\n    ...email,\n    category: ai.category,\n    confidence: Number(ai.confidence || 0),\n    reason: ai.reason || '',\n    summary: ai.summary || '',\n    suggestedAction: ai.suggested_action || '',\n    draftReplyNeeded: !!ai.draft_reply_needed,\n    draftReply: ai.draft_reply || '',\n    draftSubject: email.subject?.toLowerCase().startsWith('re:') ? email.subject : `Re: ${email.subject}`\n  }\n}];"
+      },
+      "name": "Code - Parse and Safety Check AI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2048,
+        1056
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "IMPORTANT",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "8ce74c70-a51e-4245-86a5-b8fc781e9fc8"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "IMPORTANT"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "BUSINESS_LEAD",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "929437dc-072f-416f-b23d-1769ca6dd605"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "BUSINESS_LEAD"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "NEEDS_REVIEW",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "19c83726-3a94-46b4-9554-aa367a6cff29"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "NEEDS_REVIEW"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "DELETE_CANDIDATE",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "d7250c88-fefd-4af7-9a18-08e01000b49a"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "DELETE_CANDIDATE"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Switch - Route by Category",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        2288,
+        1056
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $json.messageId }}",
+        "labelIds": [
+          "Label_2"
+        ]
+      },
+      "name": "Gmail - Label Important",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2544,
+        752
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Your gmailOAuth2 credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $json.messageId }}",
+        "labelIds": [
+          "Label_4"
+        ]
+      },
+      "name": "Gmail - Label Business Lead",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2544,
+        960
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Your gmailOAuth2 credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "draft",
+        "subject": "={{ $json.draftSubject }}",
+        "message": "={{ $json.draftReply }}",
+        "options": {}
+      },
+      "name": "Gmail - Create Draft Reply for Lead",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2784,
+        960
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Your gmailOAuth2 credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $json.messageId }}",
+        "labelIds": [
+          "Label_3"
+        ]
+      },
+      "name": "Gmail - Label Needs Review",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2544,
+        1152
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Your gmailOAuth2 credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $json.messageId }}",
+        "labelIds": [
+          "Label_5"
+        ]
+      },
+      "name": "Gmail - Label Delete Candidate",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2544,
+        1360
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Your gmailOAuth2 credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "delete",
+        "messageId": "={{ $json.labelIds[0] }}"
+      },
+      "name": "Gmail - Archive Delete Candidate Only",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2784,
+        1360
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Your gmailOAuth2 credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "=Email Log",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Date": "={{ new Date().toISOString() }}",
+            "Email From": "={{ $('Gmail Trigger - New Inbox Email').item.json.from }}",
+            "Email To": "={{ $json.to }}",
+            "Subject": "={{ $json.subject }}",
+            "Category": "={{ $json.category }}",
+            "Confidence": "={{ $json.confidence }}",
+            "Reason": "={{ $json.reason }}",
+            "Summary": "={{ $json.summary }}",
+            "Suggested Action": "={{ $json.suggestedAction }}",
+            "Draft Created": "={{ $json.category === 'BUSINESS_LEAD' ? 'Yes' : 'No' }}",
+            "Gmail Link": "={{ $json.gmailLink }}",
+            "Account Source": "={{ $json.accountSource }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Date",
+              "displayName": "Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "Email From",
+              "displayName": "Email From",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "Email To",
+              "displayName": "Email To",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "Subject",
+              "displayName": "Subject",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "Category",
+              "displayName": "Category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "Confidence",
+              "displayName": "Confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "Reason",
+              "displayName": "Reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "Summary",
+              "displayName": "Summary",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "Suggested Action",
+              "displayName": "Suggested Action",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "Draft Created",
+              "displayName": "Draft Created",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "Gmail Link",
+              "displayName": "Gmail Link",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "Account Source",
+              "displayName": "Account Source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "name": "Google Sheets - Append AI Decision Log",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        3072,
+        1056
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Your googleSheetsOAuth2Api credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "# Setup notes\n\n1. Import this JSON into n8n.\n2. Connect Gmail OAuth2 credentials in all Gmail nodes.\n3. Connect OpenRouter credentials in the HTTP Request node.\n4. Connect Google Sheets OAuth2 credentials.\n5. Create a Google Sheet named `Gmail AI Manager Log` with a tab named `Email Log`.\n6. Add these columns exactly: Date, Email From, Email To, Subject, Category, Confidence, Reason, Summary, Suggested Action, Draft Created, Gmail Link, Account Source.\n7. Replace the Sheet ID in the Google Sheets node.\n8. Create Gmail labels manually before activation:\n- AI Manager/Important\n- AI Manager/Needs Review\n- AI Manager/Business Leads\n- AI Manager/Delete Candidate\n\nSafety: This workflow labels delete candidates for review. Do not enable automatic delete until you test on your own inbox.",
+        "height": 500,
+        "width": 420
+      },
+      "name": "Sticky Note - Setup",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        432
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Gmail Trigger - New Inbox Email": {
+      "main": [
+        [
+          {
+            "node": "Gmail - Get Full Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail - Get Full Message": {
+      "main": [
+        [
+          {
+            "node": "Code - Extract Email Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Extract Email Fields": {
+      "main": [
+        [
+          {
+            "node": "OpenRouter - Classify Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenRouter - Classify Email": {
+      "main": [
+        [
+          {
+            "node": "Code - Parse and Safety Check AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Parse and Safety Check AI": {
+      "main": [
+        [
+          {
+            "node": "Switch - Route by Category",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch - Route by Category": {
+      "main": [
+        [
+          {
+            "node": "Gmail - Label Important",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Gmail - Label Business Lead",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Gmail - Label Needs Review",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Gmail - Label Delete Candidate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail - Label Important": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets - Append AI Decision Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail - Label Business Lead": {
+      "main": [
+        [
+          {
+            "node": "Gmail - Create Draft Reply for Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail - Create Draft Reply for Lead": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets - Append AI Decision Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail - Label Needs Review": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets - Append AI Decision Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail - Label Delete Candidate": {
+      "main": [
+        [
+          {
+            "node": "Gmail - Archive Delete Candidate Only",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail - Archive Delete Candidate Only": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets - Append AI Decision Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "nodeGroups": []
+}
